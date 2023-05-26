@@ -1,0 +1,99 @@
+#
+# Creates the official tracee containers.
+#
+
+ARG BTFHUB=0
+ARG FLAVOR=tracee-ebpf-core
+
+#
+# tracee-base
+#
+
+FROM alpine:3.17 as tracee-base
+LABEL AS=tracee-base
+USER root
+
+# install base environment
+
+RUN apk --no-cache update && \
+    apk --no-cache add coreutils && \
+    apk --no-cache add sudo curl && \
+    apk --no-cache add libelf zlib && \
+    apk --no-cache add libc6-compat
+
+# install OPA
+
+RUN altarch=$(uname -m | sed 's:x86_64:amd64:g' | sed 's:aarch64:arm64:g') && \
+    curl -L -o /usr/bin/opa https://github.com/open-policy-agent/opa/releases/download/v0.48.0/opa_linux_${altarch}_static && \
+    chmod 755 /usr/bin/opa
+
+#
+# tracee-make-base
+#
+
+FROM tracee-base as tracee-make-base
+LABEL AS=tracee-make-base
+USER root
+
+# install needed environment
+
+RUN apk --no-cache update && \
+    apk --no-cache add bash git rsync && \
+    apk --no-cache add coreutils findutils && \
+    apk --no-cache add llvm14 clang14 && \
+    apk --no-cache add go make gcc && \
+    apk --no-cache add musl-dev && \
+    apk --no-cache add linux-headers && \
+    apk --no-cache add elfutils-dev && \
+    apk --no-cache add libelf-static && \
+    apk --no-cache add zlib-static && \
+    ln -s /usr/bin/llc14 /usr/bin/llc
+
+#
+# tracee-make
+#
+
+FROM tracee-make-base as tracee-make
+LABEL AS=tracee-make
+ARG BTFHUB
+USER root
+ENV HOME /tracee
+WORKDIR /tracee
+
+COPY . /tracee
+
+RUN make clean && \
+    BTFHUB=$BTFHUB make tracee && \
+    BTFHUB=$BTFHUB make tracee-ebpf && \
+    make tracee-rules && \
+    make signatures && \
+    rm -rf ./3rdparty/btfhub/ && \
+    rm -rf ./3rdparty/btfhub-archive/
+
+#
+# tracee-core (tracee-base as base)
+#
+
+FROM tracee-base as tracee-core
+LABEL AS=tracee-core
+USER root
+ENV HOME /tracee
+WORKDIR /tracee
+
+COPY --from=tracee-make /tracee/dist/tracee /tracee
+COPY --from=tracee-make /tracee/dist/tracee-ebpf /tracee
+COPY --from=tracee-make /tracee/dist/tracee-rules /tracee
+COPY --from=tracee-make /tracee/dist/signatures/ /tracee/signatures/
+COPY --from=tracee-make /tracee/builder/entrypoint.sh /tracee/entrypoint.sh
+COPY --from=tracee-make /tracee/cmd/tracee-rules/templates/ /tracee/templates/
+
+ENTRYPOINT ["/tracee/entrypoint.sh"]
+
+#
+# tracee
+#
+
+FROM $FLAVOR
+USER root
+ENV HOME /tracee
+WORKDIR /tracee
